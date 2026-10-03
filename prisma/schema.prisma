@@ -7,8 +7,9 @@ datasource db {
 }
 enum Role {
   ADMIN
-  MANAGER
-  COUNSELOR
+  SALES_PERSON
+  INSTRUCTOR
+  STUDENT
 }
 model User {
   id        Int      @id @default(autoincrement())
