@@ -17,6 +17,50 @@ model User {
   email     String   @unique
   password  String
   role      Role     @default(STUDENT) 
+  isActive  Boolean  @default(true)
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
+
+    // Reverse relation to leads
+  leads     Lead[]
+}
+
+enum LeadStatus {
+  NEW
+  CONTACTED
+  COUNSELING
+  APPLICATION_SENT
+  ENROLLED
+  LOST
+}
+
+model Lead {
+  id              Int        @id @default(autoincrement())
+  
+  // Student Contact Info
+  fullName        String
+  phone           String
+  email           String?
+  city            String?
+  company         String?    // Helpful for corporate CIPS sponsorship
+  
+  // Program of interest
+  courseInterest  String     // e.g., "CIPS Level 4 Diploma"
+  
+  // Sales Pipeline
+  status          LeadStatus @default(NEW)
+  lostReason      String?    // e.g., "Budget issue", "Unresponsive"
+  
+  // Assignment & Admin Controls
+  assignedToId    Int?       // Nullable until assigned to a counselor
+  assignedTo      User?      @relation(fields: [assignedToId], references: [id])
+  
+  // Lead Source & Meta API Deduplication
+  source          String     @default("Facebook Ads")
+  facebookLeadId  String?    @unique // Prevents duplicate leads from Meta webhook retries
+  
+  createdAt       DateTime   @default(now())
+  updatedAt       DateTime   @updatedAt
+
+  @@map("leads")
 }
