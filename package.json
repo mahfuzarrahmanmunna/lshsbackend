@@ -4,9 +4,10 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "dev": "tsx watch src/app.ts",
+    "dev": "prisma generate --schema=./prisma/schema.prisma && tsx watch src/app.ts",
     "test": "echo \"Error: no test specified\"",
-    "postinstall": "prisma skills sync || exit 0"
+    "generate": "prisma generate --schema=./prisma/schema.prisma",
+    "postinstall": "prisma generate && prisma skills sync || exit 0"
   },
   "prisma": {
     "seed": "tsx prisma/seed.ts"
@@ -19,14 +20,18 @@
     "@prisma/adapter-pg": "^7.10.0",
     "@prisma/client": "^7.10.0",
     "bcrypt": "^6.0.0",
+    "cookie-parser": "^1.4.7",
     "cors": "^2.8.6",
     "express": "^5.2.1",
+    "firebase": "^12.19.0",
+    "firebase-admin": "^14.5.0",
     "jsonwebtoken": "^9.0.3",
     "pg": "^8.23.1",
     "zod": "^4.6.5"
   },
   "devDependencies": {
     "@types/bcrypt": "^6.0.0",
+    "@types/cookie-parser": "^1.4.10",
     "@types/cors": "^2.8.19",
     "@types/express": "^5.0.6",
     "@types/jsonwebtoken": "^9.0.10",

@@ -1,64 +1,90 @@
-import bcrypt from 'bcrypt'
-import jwt from 'jsonwebtoken'
-import { prisma } from '../../lib/prisma.js'
-import { env } from '../../config/env.js'
+import { adminAuth } from "../../lib/firebase-admin.js"
+import { prisma } from "../../lib/prisma.js"
+import type { Role } from "@prisma/client"
 
-type AuthUser = {
-  id: number
-  email: string
-  name: string
-  password: string
-  role: string
-  isActive: boolean
+interface DecodedFirebaseToken {
+  uid: string
+  email?: string
+  name?: string
+  picture?: string
 }
 
-export const authService = {
-  async login(email: string, password: string) {
-    const normalizedEmail = (email ?? '').trim().toLowerCase()
+export async function verifyFirebaseToken(
+  idToken: string
+): Promise<DecodedFirebaseToken | null> {
+  if (!adminAuth) return null
 
-    if (!normalizedEmail || !password) {
-      throw Object.assign(new Error('Invalid credentials'), { status: 401 })
-    }
-
-    const user = (await prisma.user.findUnique({
-      where: { email: normalizedEmail },
-      select: {
-        id: true,
-        email: true,
-        name: true,
-        password: true,
-        role: true,
-        isActive: true,
-      },
-    })) as AuthUser | null
-
-    if (!user) {
-      throw Object.assign(new Error('Invalid credentials'), { status: 401 })
-    }
-
-    const ok = await bcrypt.compare(password, user.password)
-    if (!ok) {
-      throw Object.assign(new Error('Invalid credentials'), { status: 401 })
-    }
-
-    if (!user.isActive) {
-      throw Object.assign(new Error('Account inactive'), { status: 403 })
-    }
-
-    const token = jwt.sign(
-      { userId: user.id, role: user.role, email: user.email },
-      env.jwtSecret,
-      { expiresIn: env.jwtExpiresIn as jwt.SignOptions['expiresIn'] }
-    )
-
+  try {
+    const decoded = await adminAuth.verifyIdToken(idToken)
     return {
-      token,
-      user: {
-        id: user.id,
-        email: user.email,
-        name: user.name,
-        role: user.role,
-      },
+      uid: decoded.uid,
+      email: decoded.email,
+      name: decoded.name,
+      picture: decoded.picture,
     }
-  },
+  } catch {
+    return null
+  }
+}
+
+export async function findOrCreateUser(
+  decoded: DecodedFirebaseToken,
+  name?: string
+) {
+  // Normalize email — always trim + lowercase
+  const email = decoded.email?.trim().toLowerCase()
+  if (!email) throw new Error("No email in Firebase token")
+
+  let isNew = false
+
+  const user = await prisma.$transaction(async (tx) => {
+    // Double-check inside the transaction (race condition safety)
+    const existing = await tx.user.findFirst({
+      where: {
+        OR: [{ email }, { firebaseUid: decoded.uid }],
+      },
+    })
+
+    if (existing) {
+      // Link firebaseUid if not yet linked (legacy user created before Firebase)
+      const existingFirebaseUid = (
+        existing as typeof existing & { firebaseUid?: string | null }
+      ).firebaseUid
+
+      if (!existingFirebaseUid) {
+        const updated = await tx.user.update({
+          where: { id: existing.id },
+          data: { firebaseUid: decoded.uid, password: "" },
+        })
+        return updated
+      }
+      return existing
+    }
+
+    // Parse name
+    const fullName = (name || decoded.name || email.split("@")[0]).trim()
+    const nameParts = fullName.split(/\s+/)
+    const firstName = nameParts[0] || fullName
+    const lastName = nameParts.slice(1).join(" ") || null
+
+    // First user becomes ADMIN, subsequent users default to STUDENT
+    const userCount = await tx.user.count()
+    const role: Role = userCount === 0 ? "ADMIN" : "STUDENT"
+
+    isNew = true
+
+    return tx.user.create({
+      data: {
+        name: fullName,
+        firstName,
+        lastName,
+        email,
+        firebaseUid: decoded.uid,
+        password: "",
+        role,
+      },
+    })
+  })
+
+  return { user, isNew }
 }
