@@ -1,45 +1,89 @@
-import express from "express";
-import cors from "cors";
-import prisma from "./lib/prisma.js";
-import leadRoutes from "./routes/leads.js"
-const app = express();
+import 'dotenv/config'
+import express, {
+  type Application,
+  type ErrorRequestHandler,
+  type RequestHandler,
+} from 'express'
+import cors from 'cors'
+import cookieParser from 'cookie-parser'
+import authRoutes from './modules/auth/auth.routes.js'
+import leadRoutes from './modules/leads/lead.routes.js'
+import { env } from './config/env.js'
+import { prisma } from './lib/prisma.js'
 
-app.use(cors());
-app.use(express.json());
-
-app.use((req, res, next) => {
-    console.log(`[${new Date().toLocaleTimeString()}] ${req.method} ${req.url}`);
-    next();
-});
-
-app.get("/", (req, res) => {
-    res.json({
-        message: "Sales CRM API is running",
-    });
-});
-
-app.get("/api/v1/users", async (req, res) => {
-    try {
-        const users = await prisma.user.findMany();
-
-        res.json(users);
-    } catch (error) {
-        console.error(error);
-
-        res.status(500).json({
-            message: "Failed to fetch users",
-        });
-    }
-});
-
-app.use("/api/v1/leads", leadRoutes);
-
-const PORT = 5000;;
-
-if (!process.env.VERCEL) {
-    app.listen(PORT, () => {
-        console.log(`Server running on http://localhost:${PORT}`);
-    });
+const notFoundHandler: RequestHandler = (_req, res) => {
+  res.status(404).json({
+    success: false,
+    message: 'Not found',
+  })
 }
 
-export default app;
+const errorHandler: ErrorRequestHandler = (err, _req, res, _next) => {
+  console.error(err)
+
+  if (err?.code === 'P2022' || err?.code === 'P2021') {
+    res.status(500).json({
+      success: false,
+      message:
+        'Database schema is out of date. Run `npx prisma migrate deploy` and restart the server.',
+    })
+    return
+  }
+
+  res.status(500).json({
+    success: false,
+    message: 'Internal server error',
+  })
+}
+
+const app: Application = express()
+
+app.use(
+  cors({
+    origin: process.env.FRONTEND_URL || 'http://localhost:3000',
+    credentials: true,
+    methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization', 'Cookie'],
+  })
+)
+
+app.use(cookieParser())
+
+app.use(express.json({ limit: '10mb' }))
+app.use(express.urlencoded({ extended: true }))
+
+app.get('/health', (_req, res) =>
+  res.json({
+    success: true,
+    message: 'LSHS CRM OK',
+  })
+)
+
+app.use('/api/auth', authRoutes)
+app.use('/api/leads', leadRoutes)
+
+app.use(notFoundHandler)
+app.use(errorHandler)
+
+const start = async () => {
+  try {
+    await prisma.$connect()
+    console.log('✓ Database connected')
+
+    app.listen(env.port, () => {
+      console.log(`🚀 LSHS CRM running on http://localhost:${env.port}`)
+      console.log(
+        `   CORS origin: ${
+          process.env.FRONTEND_URL || 'http://localhost:3000'
+        }`
+      )
+    })
+  } catch (err) {
+    console.error('Failed to start server:', err)
+    process.exit(1)
+  }
+}
+
+start()
+
+export default app
