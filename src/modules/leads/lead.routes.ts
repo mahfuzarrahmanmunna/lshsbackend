@@ -5,7 +5,6 @@ import { createNotification } from '../notifications/notification.service.js'
 import { requireAuth } from '../auth/auth.middleware.js'
 import schedule from 'node-schedule'
 
-
 const prisma = basePrisma as any
 
 /* ─── Schemas ──────────────────────────────────────── */
@@ -261,7 +260,6 @@ router.post('/', async (req, res) => {
     },
   })
 
-  // If lead was assigned at creation, notify the assignee
   if (assignedToId) {
     await createNotification({
       userId: assignedToId,
@@ -660,14 +658,7 @@ const updateLead = async (
 router.put('/:id', updateLead)
 router.patch('/:id', updateLead)
 
-/* ─── ASSIGN LEAD ─────────────────────────────────────
-   PATCH /api/leads/:id/assign
-   Body: { assignedToId: number, reason?: string }
-   - Creates a new LeadAssignment record (history preserved)
-   - Updates Lead.assignedToId for fast queries
-   - Creates a LeadActivity log
-   - Sends a real-time notification to the assignee
-   - Requires authentication (uses req.user.userId)        */
+/* ─── ASSIGN LEAD ───────────────────────────────────── */
 
 router.patch('/:id/assign', requireAuth, async (req, res) => {
   const parsedId = idSchema.safeParse(req.params.id)
@@ -690,7 +681,6 @@ router.patch('/:id/assign', requireAuth, async (req, res) => {
   const { assignedToId, reason } = parsedBody.data
   const userId = (req as any).user?.userId ?? null
 
-  // Find the lead — include firstName/lastName for the notification message
   const lead = await prisma.lead.findFirst({
     where: { id: parsedId.data, deletedAt: null },
     select: { id: true, assignedToId: true, firstName: true, lastName: true },
@@ -699,14 +689,11 @@ router.patch('/:id/assign', requireAuth, async (req, res) => {
     return res.status(404).json({ success: false, message: 'Lead not found' })
   }
 
-  // Idempotent — no change if already assigned to the same user
   if (lead.assignedToId === assignedToId) {
     return res.json({ success: true, message: 'Lead already assigned to this user' })
   }
 
-  // Transaction: create assignment + update lead + log activity
   const assignment = await prisma.$transaction(async (tx: typeof prisma) => {
-    // 1. Create new assignment record (old records are preserved — never deleted)
     const newAssignment = await tx.leadAssignment.create({
       data: {
         leadId: lead.id,
@@ -720,13 +707,11 @@ router.patch('/:id/assign', requireAuth, async (req, res) => {
       },
     })
 
-    // 2. Update lead's denormalized assignedToId for fast queries
     await tx.lead.update({
       where: { id: lead.id },
       data: { assignedToId },
     })
 
-    // 3. Create activity log
     await tx.leadActivity.create({
       data: {
         leadId: lead.id,
@@ -739,8 +724,6 @@ router.patch('/:id/assign', requireAuth, async (req, res) => {
     return newAssignment
   })
 
-  // 4. Create notification for the assignee (AFTER transaction succeeds)
-  //    If this fails, the assignment still succeeded — no data loss
   await createNotification({
     userId: assignedToId,
     title: 'New Lead Assigned',
@@ -818,11 +801,12 @@ router.post('/:id/notes', async (req, res) => {
   return res.status(201).json({ success: true, data: note })
 })
 
-/* ─── FOLLOW-UPS ────────────────────────────────────── */
+/* ─── FOLLOW-UPS (CREATE) ───────────────────────────── */
 
 router.post('/:id/follow-ups', async (req, res) => {
   const parsedId = idSchema.safeParse(req.params.id)
   const parsedBody = createFollowUpSchema.safeParse(req.body)
+  
   if (!parsedId.success) {
     return res.status(400).json({ success: false, message: 'Invalid lead ID' })
   }
@@ -837,12 +821,15 @@ router.post('/:id/follow-ups', async (req, res) => {
     })
   }
 
+  // 1. Fetch lead, including the assignedToId so we know who to notify if not explicitly chosen
   const lead = await prisma.lead.findFirst({
     where: { id: parsedId.data, deletedAt: null },
-    select: { id: true },
+    select: { id: true, firstName: true, lastName: true, assignedToId: true },
   })
+  
   if (!lead) return res.status(404).json({ success: false, message: 'Lead not found' })
 
+  // 2. Create the follow-up
   const followUp = await prisma.$transaction(async (tx: typeof prisma) => {
     const latest = await tx.leadFollowUp.aggregate({
       where: { leadId: lead.id },
@@ -870,20 +857,44 @@ router.post('/:id/follow-ups', async (req, res) => {
     return created
   })
 
-  // Notify the assigned user if one was specified
-  if (parsedBody.data.assignedToId) {
+  // 3. Determine the target user for the notifications
+  // If a specific user was selected, use them. Otherwise, fallback to the lead owner.
+  const targetUserId = parsedBody.data.assignedToId ?? lead.assignedToId
+  const leadName = `${lead.firstName} ${lead.lastName ?? ''}`.trim()
+
+  if (targetUserId) {
+    // INSTANT NOTIFICATION: "Task Assigned"
     await createNotification({
-      userId: parsedBody.data.assignedToId,
-      title: 'New Follow-up Assigned',
-      message: `Follow-up #${followUp.followUpNumber} (${followUp.type}) has been scheduled for you.`,
+      userId: targetUserId,
+      title: 'New Follow-up Scheduled',
+      message: `Follow-up #${followUp.followUpNumber} (${followUp.type}) for ${leadName} is scheduled for ${new Date(followUp.scheduledAt).toLocaleString()}.`,
       type: 'TASK_ASSIGNED',
       link: `/dashboard/leads/${lead.id}`,
       metadata: { leadId: lead.id, followUpId: followUp.id },
     })
+
+    // SCHEDULED REMINDER NOTIFICATION: "Task Reminder" (Fires at the selected time)
+    const reminderDate = new Date(parsedBody.data.scheduledAt)
+    
+    // Only schedule if the date is in the future
+    if (reminderDate > new Date()) {
+      schedule.scheduleJob(reminderDate, async () => {
+        await createNotification({
+          userId: targetUserId,
+          title: 'Follow-up Reminder',
+          message: `Reminder: Follow-up #${followUp.followUpNumber} (${followUp.type}) for ${leadName} is due now.`,
+          type: 'TASK_REMINDER',
+          link: `/dashboard/leads/${lead.id}`,
+          metadata: { leadId: lead.id, followUpId: followUp.id },
+        })
+      })
+    }
   }
 
   return res.status(201).json({ success: true, data: followUp })
 })
+
+/* ─── FOLLOW-UPS (UPDATE) ───────────────────────────── */
 
 router.patch('/:id/follow-ups/:followUpId', async (req, res) => {
   const parsedId = idSchema.safeParse(req.params.id)
@@ -976,99 +987,6 @@ router.delete('/:id', async (req, res) => {
     data: { deletedAt: new Date() },
   })
   return res.json({ success: true, message: 'Lead deleted successfully' })
-})
-
-
-
-router.post('/:id/follow-ups', async (req, res) => {
-  const parsedId = idSchema.safeParse(req.params.id)
-  const parsedBody = createFollowUpSchema.safeParse(req.body)
-  
-  if (!parsedId.success) {
-    return res.status(400).json({ success: false, message: 'Invalid lead ID' })
-  }
-  if (!parsedBody.success) {
-    return res.status(422).json({
-      success: false,
-      message: 'Validation failed',
-      errors: parsedBody.error.issues.map((issue) => ({
-        field: issue.path.join('.'),
-        message: issue.message,
-      })),
-    })
-  }
-
-  // 1. Fetch lead, including the assignedToId so we know who to notify if not explicitly chosen
-  const lead = await prisma.lead.findFirst({
-    where: { id: parsedId.data, deletedAt: null },
-    select: { id: true, firstName: true, lastName: true, assignedToId: true },
-  })
-  
-  if (!lead) return res.status(404).json({ success: false, message: 'Lead not found' })
-
-  // 2. Create the follow-up
-  const followUp = await prisma.$transaction(async (tx: typeof prisma) => {
-    const latest = await tx.leadFollowUp.aggregate({
-      where: { leadId: lead.id },
-      _max: { followUpNumber: true },
-    })
-    const created = await tx.leadFollowUp.create({
-      data: {
-        leadId: lead.id,
-        followUpNumber: (latest._max.followUpNumber ?? 0) + 1,
-        type: parsedBody.data.type,
-        scheduledAt: parsedBody.data.scheduledAt,
-        nextFollowUpAt: parsedBody.data.nextFollowUpAt ?? null,
-        assignedToId: parsedBody.data.assignedToId ?? null,
-        notes: parsedBody.data.notes || null,
-      },
-      include: { assignedTo: { select: { id: true, name: true } } },
-    })
-    await tx.leadActivity.create({
-      data: {
-        leadId: lead.id,
-        type: 'OTHER',
-        description: `Follow-up #${created.followUpNumber} scheduled (${created.type})`,
-      },
-    })
-    return created
-  })
-
-  // 3. Determine the target user for the notifications
-  // If a specific user was selected, use them. Otherwise, fallback to the lead owner.
-  const targetUserId = parsedBody.data.assignedToId ?? lead.assignedToId
-  const leadName = `${lead.firstName} ${lead.lastName ?? ''}`.trim()
-
-  if (targetUserId) {
-    // INSTANT NOTIFICATION: "Task Assigned"
-    await createNotification({
-      userId: targetUserId,
-      title: 'New Follow-up Scheduled',
-      message: `Follow-up #${followUp.followUpNumber} (${followUp.type}) for ${leadName} is scheduled for ${new Date(followUp.scheduledAt).toLocaleString()}.`,
-      type: 'TASK_ASSIGNED',
-      link: `/dashboard/leads/${lead.id}`,
-      metadata: { leadId: lead.id, followUpId: followUp.id },
-    })
-
-    // SCHEDULED REMINDER NOTIFICATION: "Task Reminder" (Fires at the selected time)
-    const reminderDate = new Date(parsedBody.data.scheduledAt)
-    
-    // Only schedule if the date is in the future
-    if (reminderDate > new Date()) {
-      schedule.scheduleJob(reminderDate, async () => {
-        await createNotification({
-          userId: targetUserId,
-          title: 'Follow-up Reminder',
-          message: `Reminder: Follow-up #${followUp.followUpNumber} (${followUp.type}) for ${leadName} is due now.`,
-          type: 'TASK_REMINDER',
-          link: `/dashboard/leads/${lead.id}`,
-          metadata: { leadId: lead.id, followUpId: followUp.id },
-        })
-      })
-    }
-  }
-
-  return res.status(201).json({ success: true, data: followUp })
 })
 
 export default router
