@@ -7,16 +7,18 @@ datasource db {
 }
 
 model User {
-  id                  Int                 @id @default(autoincrement())
-  name                String
-  email               String              @unique
-  createdAt           DateTime            @default(now())
-  password            String
-  role                Role                @default(STUDENT)
-  updatedAt           DateTime            @updatedAt
-  isActive            Boolean             @default(true)
-  firstName           String?
-  lastName            String?
+  id          Int      @id @default(autoincrement())
+  name        String
+  email       String   @unique
+  firebaseUid String?  @unique          // 👈 ADD THIS
+  createdAt   DateTime @default(now())
+  password    String
+  role        Role     @default(STUDENT)
+  updatedAt   DateTime @updatedAt
+  isActive    Boolean  @default(true)
+  firstName   String?
+  lastName    String?
+  notifications Notification[]  
   activities          LeadActivity[]
   assignmentsBy       LeadAssignment[]    @relation("AssignmentAssignedBy")
   assignmentsAssigned LeadAssignment[]    @relation("AssignmentAssignedTo")
@@ -339,4 +341,38 @@ enum LostReason {
   DUPLICATE
   PRICE
   OTHER
+}
+
+// ============ NOTIFICATION TYPES ============
+
+enum NotificationType {
+  LEAD_ASSIGNED
+  LEAD_UPDATED
+  TASK_ASSIGNED
+  TASK_REMINDER
+  MEETING_REMINDER
+  NEW_MESSAGE
+  SYSTEM
+}
+
+// ============ NOTIFICATION ============
+
+model Notification {
+  id        Int              @id @default(autoincrement())
+  userId    Int
+  title     String
+  message   String
+  type      NotificationType
+  link      String?
+  metadata  Json?
+  isRead    Boolean          @default(false)
+  readAt    DateTime?
+  createdAt DateTime         @default(now())
+  updatedAt DateTime         @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, isRead])
+  @@index([userId, createdAt])
+  @@map("notifications")
 }

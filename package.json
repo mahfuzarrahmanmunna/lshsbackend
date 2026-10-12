@@ -24,10 +24,16 @@
     "cors": "^2.8.6",
     "dotenv": "^18.0.5",
     "express": "^5.2.1",
+    "firebase-admin": "^14.5.0",
+    "node-schedule": "^2.1.1",
     "pg": "^8.23.1",
     "prisma": "^7.10.0",
+    "socket.io": "^4.8.4",
     "tsx": "^4.23.15",
-    "typescript": "^7.0.2"
+    "typescript": "^7.0.2",
+    "zod": "^4.6.5"
   },
-  "devDependencies": {}
+  "devDependencies": {
+    "@types/node-schedule": "^2.1.8"
+  }
 }
